@@ -12,8 +12,8 @@ jobs:
 
       - name: Deploy files
         run: |
-          mkdir -p ~/ci-cd-deploy
-          rsync -av --delete \
+          sudo mkdir -p ~/ci-cd-deploy
+          sudo rsync -av --delete \
             --exclude ".git" \
             --exclude ".github" \
             ./ /var/www/html/
