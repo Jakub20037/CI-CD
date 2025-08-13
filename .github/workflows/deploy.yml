@@ -1,0 +1,89 @@
+name: CI-CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: CI-CD-${{ github.sha }}.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test --if-present
+
+      - name: Build project
+        run: npm run build --if-present
+
+      - name: Prune dev dependencies
+        run: npm prune --production
+
+      - name: Package artifact
+        run: |
+          mkdir -p deploy_package
+          cp -r package.json package-lock.json node_modules dist server.js deploy_package/
+          tar -C deploy_package -czf CI-CD-${{ github.sha }}.tar.gz .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CI-CD-${{ github.sha }}.tar.gz
+          path: CI-CD-${{ github.sha }}.tar.gz
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: CI-CD-${{ github.sha }}.tar.gz
+          path: .
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p "${{ secrets.SSH_PORT || 22 }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload release
+        run: |
+          RELEASE_DIR="/home/azubi/deploy/releases/${{ github.sha }}"
+          ssh -p "${{ secrets.SSH_PORT || 22 }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" "mkdir -p $RELEASE_DIR"
+          scp -P "${{ secrets.SSH_PORT || 22 }}" "CI-CD-${{ github.sha }}.tar.gz" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:$RELEASE_DIR/"
+          ssh -p "${{ secrets.SSH_PORT || 22 }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" "cd $RELEASE_DIR && tar -xzf CI-CD-${{ github.sha }}.tar.gz && rm CI-CD-${{ github.sha }}.tar.gz"
+
+      - name: Symlink switch + restart
+        run: |
+          HOST="${{ secrets.SSH_HOST }}"
+          USER="${{ secrets.SSH_USER }}"
+          PORT="${{ secrets.SSH_PORT || 22 }}"
+          RELEASE_DIR="/home/azubi/deploy/releases/${{ github.sha }}"
+          CURRENT="/home/azubi/deploy/current"
+          ENV_FILE="/home/azubi/deploy/shared/.env"
+
+          ssh -p "$PORT" "$USER@$HOST" bash -lc "
+            set -e
+            if [ -f \"$ENV_FILE\" ] && [ ! -f \"$RELEASE_DIR/.env\" ]; then ln -s \"$ENV_FILE\" \"$RELEASE_DIR/.env\"; fi
+            ln -sfn \"$RELEASE_DIR\" \"$CURRENT\"
+            sudo systemctl restart CI-CD
+          "
+
+      - name: Cleanup old releases
+        run: |
+          ssh -p "${{ secrets.SSH_PORT || 22 }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" '
+            cd /home/azubi/deploy/releases &&
+            ls -1t | tail -n +6 | xargs -r rm -rf
+          '
